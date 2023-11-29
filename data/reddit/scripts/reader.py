@@ -42,8 +42,8 @@ class Document:
 	__NAN_VALUE	= ""
 
 	def __init__(self, doc_id: str, title: str, body: str,
-				 dct, author: str, subreddit: str,
-				 meds: list, dates=[], durs=[], labels =None):
+				 dct, meds: list, dates=[], durs=[], 
+				 labels =None, author: str=None, subreddit: str=None):
 		assert(len(meds) > 0)
 		
 		self.doc_id 	= doc_id

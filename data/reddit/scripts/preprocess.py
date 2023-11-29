@@ -1,99 +1,109 @@
 """
 Format reddit data for GTT
+TEMPLATES: 
+	Each value is a list of entity mentions as (string, char_offset) tuples
+	Start is in between (Start_min,  Start_max) exclusive 
+	 UNLESS  Start_min == Start_max, then start = those values
+
 """
 
 import json
 from collections import OrderedDict
+from typing import List, Tuple
+ 
 from pprint import pprint
 from reader import read_docs
 
-#TEMPLATES: start is in between (start_min,  start_max) exclusive UNLESS 
-#			start_min == start_max, then start = those values
-def format_example(doc):
-	example = OrderedDict([("docid", doc.doc_id), ("doctext", None), ("templates", None)])
 
-	# Preprocess text
-	## Calculate character left-shift
-	start_string = "0000-00-00"
-	text = f"Story begins: {start_string}. Story ends: {doc.dct}."
-	start_entity = [[start_string, text.find(start_string)]]
-	dct_entity = [[doc.dct, text.find(doc.dct)]]
-	if doc.dct == start_string:
-		print(f"Error: {doc.id} has faulty DCT {doc.dct}")
+MIN_DATE_STRING  = "0000-00-00"
+
+def format_text(doc) -> (str, int, int):
+	"""
+	Formats text by concatenating title + body, stripping whitespace, and lower casing.
+	Injects DCT entity and dummy MIN_date entity.
+	Calculates resulting character shift for entities originating in the title and body.
+	Returns: text, title shift, body shift
+	"""
+	if doc.dct == MIN_DATE_STRING:
+		print(f"Error: {doc.doc_id} has faulty DCT {doc.dct}")
 		return 
 	
+	text = f"Story begins: {MIN_DATE_STRING}. Story ends: {doc.dct}."
 	if len(doc.title.strip()) > 0:
 		title_shift = len(text) - (len(doc.title) - len(doc.title.lstrip())) + 1
 		text += "\n" + doc.title.strip()
 	body_shift = len(text) -(len(doc.body) - len(doc.body.lstrip())) + 1
 	text += "\n" + doc.body.strip()
 	text = text.lower()
+
+	return text, (title_shift, body_shift)
+
+def format_entity_mentions(mentions: List, title_shift: int, body_shift: int) ->  List[Tuple[str, int]]:
+	"""
+	Formats list of entity-mentions for TLTemplate attributes 
+	and updates character offsets
+	"""
+	formatted = []
+	for ment in mentions:
+		offset =  ment.span[0]
+		if ment.source == 0:
+			offset += title_shift
+		else:
+			offset += body_shift
+		formatted.append([ment.string, offset])
+	return formatted
+
+def format_example(doc):
+	example = OrderedDict([("docid", doc.doc_id), ("doctext", None), ("templates", [])])
+
+	text, shifts= format_text(doc)
 	example["doctext"] = text
 
-	def create_role_filler(entities):
-		role = []
-		for ent in entities:
-			span_index =  ent.span[0]
-			if ent.source == 0:
-				span_index += title_shift
-			else:
-				span_index += body_shift
-			role.append([ent.string, span_index])
-		return role
+	# Format date entities
+	MIN_entity = [MIN_DATE_STRING, text.find(MIN_DATE_STRING)]
+	DCT_entity = [doc.dct, text.find(doc.dct)]
+	# Chronological map: date_id -> formatted entity
+	date_entities = OrderedDict([(date_id, format_entity_mentions(doc.dates[date_id], *shifts)) for date_id in doc.dates])
+	date_entities["DCT"] = [DCT_entity]
 
-	example["templates"] = []
 	# Add template for each medication
 	for med_id, med_mentions in doc.meds.items():
 		if doc.labels[med_id]["DCT"] == "before":
-			#invalid label
+			# Invalid label
 			continue
-		template = OrderedDict()
-		template["Medication"]  = create_role_filler(med_mentions)
 
-		template["Start_min"] = [start_entity]
-		template["Start_max"] = None
-		template["Stop_min"] = None
-		template["Stop_max"] = None
+		template = OrderedDict([("Medication", []), ("Start_min", [MIN_entity]), ("Start_max", None), ("Stop_min", [MIN_entity]), ("Stop_max", None)])
+		template["Medication"] = format_entity_mentions(med_mentions, *shifts)
 
-		# Get labels
-		for date_id, label in doc.labels[med_id].items():
+		# Get labels (order: before, start, on, stop, after)
+		for date_id, date_mentions in date_entities.items():
+			label = doc.labels[med_id][date_id]
 			if label == "uncertain":
 				continue
-			if label == "no_intake":
+			if label == "no_intake":# TODO
 				break
-			if date_id == "DCT":
-				role = [dct_entity]
-			else:
-				role = create_role_filler(doc.dates[date_id])
+			
+			if label in ["before", "start"]:
+				# Update Start MIN. to last label <= start
+				template["Start_min"]= date_mentions
+			if label != "before" and not template["Start_max"]:
+				# Update Start MAX. to first label >= "start"
+				template["Start_max"]= date_mentions
+			if label != "after":
+				# Update Stop MIN. to last label <= "stop"
+				template["Stop_min"] = date_mentions
+			if label == "stop" or (label == "after" and not template["Stop_max"]):
+				# Update Stop MAX. to first label >= "stop"
+				template["Stop_max"] = date_mentions
 
-			if label == "before":
-				template["Start_min"] = role
-				template["Stop_min"] = role
-			elif not template["Start_max"]:
-					template["Start_max"] = role
-			if label == "start":
-				template["Start_min"] = role
-				template["Start_max"] = role
-				template["Stop_min"] = role
-			if label == "on":
-				template["Stop_min"] = role
-			if label == "stop":
-				template["Stop_min"] = role
-				template["Stop_max"] = role
-			if label == "after":
-				if not template["Stop_max"]:
-					template["Stop_max"] = role
-
-		if template["Stop_min"] and not template["Stop_max"]:
-			# If never stopped (e.g. no after or stop label), the remove stop_min
-			template["Stop_min"] = None
-
-		#TODO get durations
-
-		# Add med-template if positive_intake and at least one non-uncertain relation 
-		if template["Start_max"]: 
+		if  not template["Stop_max"]:
+			# Removed Stop_min if never stopped
+			template["Stop_min"] = None 
+		if template["Start_max"]:
+			# Add template if positive_intake and at least one non-uncertain relation
 			example["templates"].append(template)
 
+		#TODO get durations
 	return example
 
 
@@ -107,19 +117,26 @@ if __name__=='__main__':
 	examples = []
 	for doc in data:
 		ex =  format_example(doc)
-		if len(ex["templates"]) > 0:
+		if ex["templates"]:
+			# for t in ex["templates"]:
+			# 	for ent_list in t.values():
+			# 		if ent_list:
+			# 			for string, i in ent_list:
+			# 				# print(string, ex["doctext"][i:i+len(string)] )
+			# 				assert string.lower() == ex["doctext"][i:i+len(string)]
 			examples.append(ex)
-	print(len(examples))
-	# pprint(examples[2])
+
 	# # TODO: split data
 	# for div in ["train", "dev", "test"]:
-	# 	# normal written
-	# 	processed_file = "../processed/" + div + ".json"
-	# 	with open(processed_file, "w+") as f_processed:
-	# 		for ex in examples:
-	# 			f_processed.write(json.dumps(ex) + "\n")
-	# 	# pretty written
-	# 	processed_file = "../processed/pretty_" + div + ".json"
-	# 	with open(processed_file, "w+") as f_processed:
-	# 		for ex in examples:
-	# 			f_processed.write(json.dumps(ex, indent=4) + "\n")
+
+	# Save files
+	div = "test"
+	processed_file = "processed/" + div + ".json"
+	with open(processed_file, "w") as f_processed:
+		for ex in examples:
+			f_processed.write(json.dumps(ex) + "\n")
+	# pretty written
+	processed_file = "processed/pretty_" + div + ".json"
+	with open(processed_file, "w") as f_processed:
+		for ex in examples:
+			f_processed.write(json.dumps(ex, indent=4) + "\n")
