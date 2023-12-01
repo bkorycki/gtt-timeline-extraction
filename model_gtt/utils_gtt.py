@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class InputExample(object):
     """A single training/test example for token classification."""
 
-    def __init__(self, docid, tokens, templates):
+    def __init__(self, docid, tokens, meds, templates):
         """Constructs a InputExample.
 
         Args:
@@ -40,6 +40,7 @@ class InputExample(object):
         """
         self.docid = docid
         self.tokens = tokens
+        self.meds = meds
         self.templates = templates
 
 
@@ -127,40 +128,34 @@ def read_examples_from_file(data_dir, mode, tokenizer, debug=False):
             if len(examples) >3 and debug:
                 break
             line = json.loads(line)
-            if mode == "train":
-                docid = int(line["docid"].split("-")[-1]) # transform DEV-MUC3-0001 to 1
-            else:
-                docid = int(line["docid"].split("-")[0][-1])*10000 + int(line["docid"].split("-")[-1]) # transform TST1-MUC3-0001 to 10001
-
+            
+            docid = int(line["docid"][3:])
             doctext, templates_raw = line["doctext"], line["templates"]
             doctext_tokens = tokenizer.tokenize(doctext)
 
-            # for role, entitys in extracts_raw.items():
-            #     extracts[role] = []
-            #     for entity in entitys:
-            #         first_mention_tokens = tokenizer.tokenize(entity[0][0])
-            #         start, end = find_sub_list(first_mention_tokens, doctext_tokens)
-            #         if start != -1 and end != -1:
-            #             extracts[role].append([start, end])
-
             templates = []
+            meds = []
             example_entity_cnt = 0
             for template_raw in templates_raw:
                 template = OrderedDict()
                 for role, value in template_raw.items():
-                    if role == "incident_type":
-                        template[role] = value
-                    else:
-                        template[role] = []
-                        for entity in value:
-                            first_mention_tokens = tokenizer.tokenize(entity[0][0])
-                            start, end = find_sub_list(first_mention_tokens, doctext_tokens)
-                            if start != -1 and end != -1:
-                                template[role].append([start, end])
-                                example_entity_cnt += 1
+                    print(value)
+                    if role == "Medication":
+                        meds.append(value[0][0])
+                    template[role] = []
+                    if not value: value = []
+                    for entity in value:
+                        first_mention_tokens = tokenizer.tokenize(entity[0])
+                        start, end = find_sub_list(first_mention_tokens, doctext_tokens)
+                        if start != -1 and end != -1:
+                            template[role].append([start, end])
+                            example_entity_cnt += 1
+                        else:
+                            print("Tokenization error")
 
                 templates.append(template)
-            examples.append(InputExample(docid=docid, tokens=doctext_tokens, templates=templates))
+            assert(len(meds)==len(set(meds)))
+            examples.append(InputExample(docid=docid, tokens=doctext_tokens, meds=meds, templates=templates))
 
     return examples
 
@@ -200,10 +195,8 @@ def convert_examples_to_features(
         if ex_index % 10000 == 0:
             logger.info("Writing example %d of %d", ex_index, len(examples))
 
-        docid, tokens, templates = example.docid, example.tokens, example.templates
-        # roles = sorted(extracts.keys())
-        # trunkcating ``tokens'', special_tokens_count: account for [CLS] and [SEP]
-        special_tokens_count = 3 + 7
+        docid, tokens, meds, templates= example.docid, example.tokens, example.meds, example.templates
+        special_tokens_count  = 3 + max_num_templates # cls, sep_t, sep, and max num medication tokens (added to beginning)
         if len(tokens) > max_seq_length_src - special_tokens_count:
             tokens = tokens[: (max_seq_length_src - special_tokens_count)]
 
@@ -212,30 +205,19 @@ def convert_examples_to_features(
         src_segment_ids, tgt_segment_ids = [], []
         src_position_ids, tgt_position_ids = [], []
         label_ids = []
-        role_to_src_token_offset = {}
         token_offset_to_src_token_offset = {}
-        # incident_types = ['kidnapping', 'attack', 'bombing', 'robbery', 'arson', 'forced work stoppage', 'bombing / attack', 'attack / bombing']
-        incident_types = ['kidnapping', 'attack', 'bombing', 'robbery', 'arson', 'bombing / attack', 'attack / bombing']
-        incident_type_to_src_token_offset = {}
+        med_to_src_token_offset = {}
 
         ######### src_tokens, src_mask, src_segment_ids, src_position_ids 
         # [CLS]
         src_tokens.append(cls_token)
 
-        # # roles
-        # for role in roles:
-        #     role_tokens = tokenizer.tokenize(role)
-        #     src_tokens.append(role_tokens[0])
-        #     role_to_src_token_offset[role] = len(src_tokens) - 1
-        # # [SEP]
-        # src_tokens.append(sep_token)
+        # Medications
+        for med in meds:
+            med_token =  tokenizer.tokenize(med)[0]
+            src_tokens.append(med_token)
+            med_to_src_token_offset[med_token] = len(src_tokens) - 1
 
-        # incident types
-        for incident_t in incident_types:
-            incident_t_token = tokenizer.tokenize(incident_t)[0]
-            if incident_t_token not in incident_type_to_src_token_offset:
-                src_tokens.append(incident_t_token)
-                incident_type_to_src_token_offset[incident_t_token] = len(src_tokens) - 1
         # [SEP]_template
         src_tokens.append(sep_template)
         sep_template_offset = len(src_tokens) - 1
@@ -244,6 +226,7 @@ def convert_examples_to_features(
         for idx, token in enumerate(tokens):
             src_tokens.append(token)
             token_offset_to_src_token_offset[idx] = len(src_tokens) - 1
+
         # [SEP]
         src_tokens.append(sep_token)
         src_segment_ids = [sequence_a_segment_id] * len(src_tokens)
@@ -259,28 +242,11 @@ def convert_examples_to_features(
         src_segment_ids += [pad_token_segment_id] * padding_length
         src_position_ids += [0] * padding_length
 
-        # import ipdb; ipdb.set_trace()
-
         ############ tgt_tokens, tgt_mask, tgt_segment_ids, tgt_position_ids, label_ids
         num_entity_span = 0
         # [CLS] (as start)
         tgt_tokens.append(cls_token)
         tgt_position_ids.append(0)
-        # # each roles' spans
-        # for role in roles:
-        #     # role_tokens = tokenizer.tokenize(role)
-        #     # tgt_tokens.append(role_tokens[0])
-        #     for span in extracts[role]:
-        #         if num_entity_span < max_num_entity_tgt and span[0] in range(len(tokens)) and span[1] in range(len(tokens)):
-        #             num_entity_span += 1
-        #             tgt_tokens.append(tokens[span[0]]) # span start token
-        #             tgt_position_ids.a`ppend(token_offset_to_src_token_offset[span[0]])
-        #             tgt_tokens.append(tokens[span[1]]) # span end token
-        #             tgt_position_ids.append(token_offset_to_src_token_offset[span[1]])
-        #     tgt_tokens.append(sep_token)
-        #     tgt_position_ids.append(len(src_tokens) - 1) # to confirm
-        # tgt_segment_ids = [1 - sequence_a_segment_id] * len(tgt_tokens)
-        # label_ids = tgt_position_ids[1:]
 
         # each templates' spans
         num_templates = 0
@@ -289,20 +255,13 @@ def convert_examples_to_features(
             if num_templates >  max_num_templates:
                 break
             for role in template:
-                if role == "incident_type":
-                    incident_t_token = tokenizer.tokenize(template[role])[0]
-                    if incident_t_token not in incident_type_to_src_token_offset:
-                        break
-                    tgt_tokens.append(incident_t_token)
-                    tgt_position_ids.append(incident_type_to_src_token_offset[incident_t_token])
-                else:
-                    for span in template[role]:
-                        if num_entity_span < max_num_entity_tgt and span[0] in range(len(tokens)) and span[1] in range(len(tokens)):
-                            num_entity_span += 1
-                            tgt_tokens.append(tokens[span[0]]) # span start token
-                            tgt_position_ids.append(token_offset_to_src_token_offset[span[0]])
-                            tgt_tokens.append(tokens[span[1]]) # span end token
-                            tgt_position_ids.append(token_offset_to_src_token_offset[span[1]])
+                for span in template[role]:
+                    if num_entity_span < max_num_entity_tgt and span[0] in range(len(tokens)) and span[1] in range(len(tokens)):
+                        num_entity_span += 1
+                        tgt_tokens.append(tokens[span[0]]) # span start token
+                        tgt_position_ids.append(token_offset_to_src_token_offset[span[0]])
+                        tgt_tokens.append(tokens[span[1]]) # span end token
+                        tgt_position_ids.append(token_offset_to_src_token_offset[span[1]])
                 tgt_tokens.append(sep_token)
                 tgt_position_ids.append(len(src_tokens) - 1) # to confirm
 
@@ -351,13 +310,13 @@ def convert_examples_to_features(
         if len(input_ids) != 510:
             import ipdb; ipdb.set_trace()
 
-        # import ipdb; ipdb.set_trace()
-
         if ex_index < 1:
             logger.info("*** Example ***")
             logger.info("docid: %d", docid)
+            logger.info("meds: %s", " ".join([str(x) for x in meds]))
             logger.info("tokens: %s", " ".join([str(x) for x in tokens]))
-            # logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
+            logger.info("source_ids: %s", tokenizer.decode(src_tokens_ids))
+            logger.info("target_ids: %s", tokenizer.decode(tgt_tokens_ids))
             # logger.info("input_mask: %s", " ".join([str(x) for x in input_mask]))
             logger.info("segment_ids: %s", " ".join([str(x) for x in segment_ids]))
             logger.info("position_ids: %s", " ".join([str(x) for x in position_ids]))
