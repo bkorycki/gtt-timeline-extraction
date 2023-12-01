@@ -8,14 +8,17 @@ TEMPLATES:
 """
 
 import json
+from sklearn.model_selection import train_test_split
 from collections import OrderedDict
 from typing import List, Tuple
  
 from pprint import pprint
 from reader import read_docs
 
+SEED = 42
+SPLIT = [0.8, 0.1, 0.1]
 
-MIN_DATE_STRING  = "0000-00-00"
+MIN_DATE_STRING  = "0001-01-01"
 
 def format_text(doc) -> (str, int, int):
 	"""
@@ -106,8 +109,15 @@ def format_example(doc):
 		#TODO get durations
 	return example
 
-
-
+def save_file(div, data):
+	processed_file = "processed/" + div + ".json"
+	with open(processed_file, "w") as f_processed:
+		for ex in data:
+			f_processed.write(json.dumps(ex) + "\n")
+	processed_file = "processed/pretty_" + div + ".json"
+	with open(processed_file, "w") as f_processed:
+		for ex in data:
+			f_processed.write(json.dumps(ex, indent=4) + "\n")
 
 if __name__=='__main__':
 
@@ -118,25 +128,18 @@ if __name__=='__main__':
 	for doc in data:
 		ex =  format_example(doc)
 		if ex["templates"]:
-			# for t in ex["templates"]:
-			# 	for ent_list in t.values():
-			# 		if ent_list:
-			# 			for string, i in ent_list:
-			# 				# print(string, ex["doctext"][i:i+len(string)] )
-			# 				assert string.lower() == ex["doctext"][i:i+len(string)]
 			examples.append(ex)
 
-	# # TODO: split data
-	# for div in ["train", "dev", "test"]:
+	# Split data
+	num_train = int(SPLIT[0]*len(examples))
+	num_test = int(SPLIT[1]/1-SPLIT[0]) *len(examples)
 
+	train_data, test_data = train_test_split(examples, train_size=SPLIT[0], random_state=SEED)
+	test_data, dev_data = train_test_split(test_data, train_size=SPLIT[1]/(1-SPLIT[0]), random_state=SEED)
+	print(f"{len(train_data)} train, {len(test_data)} test, {len(dev_data)} dev.")
+	
 	# Save files
-	div = "test"
-	processed_file = "processed/" + div + ".json"
-	with open(processed_file, "w") as f_processed:
-		for ex in examples:
-			f_processed.write(json.dumps(ex) + "\n")
-	# pretty written
-	processed_file = "processed/pretty_" + div + ".json"
-	with open(processed_file, "w") as f_processed:
-		for ex in examples:
-			f_processed.write(json.dumps(ex, indent=4) + "\n")
+	save_file("train", train_data)
+	save_file("test", test_data)
+	save_file("dev", dev_data)
+
