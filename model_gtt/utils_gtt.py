@@ -121,8 +121,8 @@ def read_golds_from_test_file(data_dir, tokenizer, debug=False):
     return doctexts_tokens, golds
 
 def read_examples_from_file(data_dir, mode, tokenizer, debug=False):
-    file_path = os.path.join(data_dir, "{}.json".format(mode))
     examples = []
+    file_path = os.path.join(data_dir, "{}.json".format(mode))
     with open(file_path, encoding="utf-8") as f:
         for line in f:
             if len(examples) >3 and debug:
